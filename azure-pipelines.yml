@@ -1,10 +1,10 @@
-name: MTPREE-2.20 - FRAMEWORK
+name: MTPREE-2.20 - netfour
 
 # trigger:
 #   branches:
 #     include:
 #     - master
-trigger: none
+
 pool:
   name: MTPre
 
@@ -49,27 +49,38 @@ stages:
       inputs:
         targetType: 'inline'
         script: |
-          $solution = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Filter *.sln -Recurse | Select-Object -First 1
-
-          if (-not $solution) {
-              Write-Host "##vso[task.logissue type=error]No .sln file found"
-              exit 1
-          }
-
-          $solutionPath = $solution.FullName
-          Write-Host "##[section]Found solution: $solutionPath"
-
-          $msbuild = "${env:Program Files\Microsoft Visual Studio\2022\Community\Msbuild\Current\Bin\MSBuild.exe"
+          $msbuild = "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe"
           if (-not (Test-Path $msbuild)) {
-              Write-Host "##vso[task.logissue type=error]MSBuild not found at expected path: $msbuild"
+              Write-Host "##vso[task.logissue type=error]MSBuild not found at path: $msbuild"
               exit 1
           }
 
-          & $msbuild $solutionPath /p:Configuration=$(buildConfiguration) /p:DeployOnBuild=true /p:PublishProfile=FolderProfile /p:PublishDir="$(sourcePath)\"
+          $solutionFiles = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Filter *.sln
+          if ($solutionFiles.Count -eq 0) {
+              Write-Host "##vso[task.logissue type=error]No .sln file found in sources"
+              exit 1
+          }
+          elseif ($solutionFiles.Count -gt 1) {
+              Write-Host "##vso[task.logissue type=error]Multiple .sln files found. Please specify."
+              $solutionFiles | ForEach-Object { Write-Host "Found: $($_.FullName)" }
+              exit 1
+          }
+
+          $solutionPath = $solutionFiles[0].FullName
+          Write-Host "Using solution: $solutionPath"
+
+          & $msbuild $solutionPath `
+            /p:Configuration=$(buildConfiguration) `
+            /p:DeployOnBuild=true `
+            /p:PublishProfile=FolderProfile `
+            /p:PublishDir="$(sourcePath)\"
+
           if ($LASTEXITCODE -ne 0) {
               Write-Host "##vso[task.logissue type=error]MSBuild failed"
               exit 1
           }
+
+          Write-Host "##[section]MSBuild completed successfully"
 
     - task: PowerShell@2
       displayName: 'Package Build'
