@@ -1,10 +1,4 @@
 name: MTPREE-2.20 - netfour
-
-# trigger:
-#   branches:
-#     include:
-#     - master
-
 pool:
   name: MTPre
 
@@ -14,8 +8,8 @@ parameters:
   type: string
   default: 'deploy'
   values:
-    - deploy
-    - rollback
+  - deploy
+  - rollback
 
 variables:
 - name: appPoolName
@@ -32,6 +26,8 @@ variables:
   value: 'E:\Deployment\Backup\netfour'
 - name: buildConfiguration
   value: 'Release'
+- name: publishZipPath
+  value: ''
 
 stages:
 - stage: DeployStage
@@ -41,8 +37,10 @@ stages:
   - job: DeployJob
     displayName: Build and Deploy to IIS
     steps:
-    - checkout: self
-      clean: true
+    - task: 6d15af64-176c-496d-b583-fd2ae21d4df4@1
+      inputs:
+        repository: self
+        clean: true
 
     - task: PowerShell@2
       displayName: 'MSBuild & Publish'
@@ -59,8 +57,7 @@ stages:
           if ($solutionFiles.Count -eq 0) {
               Write-Host "##vso[task.logissue type=error]No .sln file found in sources"
               exit 1
-          }
-          elseif ($solutionFiles.Count -gt 1) {
+          } elseif ($solutionFiles.Count -gt 1) {
               Write-Host "##vso[task.logissue type=error]Multiple .sln files found. Please specify."
               $solutionFiles | ForEach-Object { Write-Host "Found: $($_.FullName)" }
               exit 1
@@ -89,9 +86,24 @@ stages:
         script: |
           $timestamp = Get-Date -Format 'yyyyMMddHHmmss'
           New-Item -Path "$(publishPath)" -ItemType Directory -Force | Out-Null
+
+          if (-not (Get-ChildItem -Path "$(sourcePath)\*" -Recurse | Where-Object { -not $_.PSIsContainer })) {
+              Write-Host "##vso[task.logissue type=error]No files found in source path: $(sourcePath)"
+              exit 1
+          }
+
+          Write-Host "Contents of source path before packaging:"
+          Get-ChildItem -Path "$(sourcePath)\*" -Recurse | Select-Object FullName
+
           $zipPath = "$(publishPath)\$(zipBaseName)_$timestamp.zip"
           Compress-Archive -Path "$(sourcePath)\*" -DestinationPath $zipPath -Force
-          Write-Host "##vso[task.setvariable variable=publishZipPath]$zipPath"
+
+          if (-not (Test-Path $zipPath)) {
+              Write-Host "##vso[task.logissue type=error]ZIP package creation failed at path: $zipPath"
+              exit 1
+          }
+
+          Write-Host "##vso[task.setvariable variable=publishZipPath;isOutput=true]$zipPath"
           Write-Host "##[section]Package created at $zipPath"
 
     - task: PowerShell@2
@@ -121,6 +133,12 @@ stages:
       inputs:
         targetType: 'inline'
         script: |
+          if (-not (Test-Path "$(publishZipPath)")) {
+              Write-Host "##vso[task.logissue type=error]Expected package not found: $(publishZipPath)"
+              exit 1
+          }
+
+          Write-Host "Deploying from package: $(publishZipPath)"
           Remove-Item -Recurse -Force "$(deployPath)\*" -ErrorAction SilentlyContinue
           Expand-Archive -Path "$(publishZipPath)" -DestinationPath "$(deployPath)" -Force
           Write-Host "##[section]Deployment completed"
@@ -192,6 +210,7 @@ stages:
               Write-Host "##vso[task.logissue type=error]No backup found to rollback"
               exit 1
           }
+
           Remove-Item -Recurse -Force "$(deployPath)\*" -ErrorAction SilentlyContinue
           Expand-Archive -Path $latestBackup.FullName -DestinationPath "$(deployPath)" -Force
           Write-Host "##[section]Rollback completed: restored $($latestBackup.FullName)"
