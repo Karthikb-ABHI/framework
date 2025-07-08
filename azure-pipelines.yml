@@ -51,11 +51,8 @@ stages:
           $msbuild = "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe"
           $solutionFiles = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Filter *.sln
           if ($solutionFiles.Count -eq 1) {
-              & $msbuild $solutionFiles[0].FullName \
-                /p:Configuration=$(buildConfiguration) \
-                /p:DeployOnBuild=true \
-                /p:PublishProfile=FolderProfile \
-                /p:PublishDir="$(sourcePath)\"
+              $solutionPath = $solutionFiles[0].FullName
+              & $msbuild $solutionPath /p:Configuration=$(buildConfiguration) /p:DeployOnBuild=true /p:PublishProfile=FolderProfile /p:PublishDir="$(sourcePath)\"
           } else {
               Write-Host "##vso[task.logissue type=error]Solution file issue"
               exit 1
