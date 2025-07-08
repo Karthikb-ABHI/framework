@@ -1,4 +1,7 @@
 name: MTPREE-2.20 - netfour
+
+trigger: none
+
 pool:
   name: MTPre
 
@@ -26,21 +29,19 @@ variables:
   value: 'E:\Deployment\Backup\netfour'
 - name: buildConfiguration
   value: 'Release'
-- name: publishZipPath
-  value: ''
+- name: action
+  value: ${{ parameters.action }}
 
 stages:
 - stage: DeployStage
   displayName: Build + Deploy
-  condition: eq('${{ parameters.action }}', 'deploy')
+  condition: eq(variables['action'], 'deploy')
   jobs:
   - job: DeployJob
     displayName: Build and Deploy to IIS
     steps:
-    - task: 6d15af64-176c-496d-b583-fd2ae21d4df4@1
-      inputs:
-        repository: self
-        clean: true
+    - checkout: self
+      clean: true
 
     - task: PowerShell@2
       displayName: 'MSBuild & Publish'
@@ -48,63 +49,28 @@ stages:
         targetType: 'inline'
         script: |
           $msbuild = "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe"
-          if (-not (Test-Path $msbuild)) {
-              Write-Host "##vso[task.logissue type=error]MSBuild not found at path: $msbuild"
-              exit 1
-          }
-
           $solutionFiles = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Filter *.sln
-          if ($solutionFiles.Count -eq 0) {
-              Write-Host "##vso[task.logissue type=error]No .sln file found in sources"
-              exit 1
-          } elseif ($solutionFiles.Count -gt 1) {
-              Write-Host "##vso[task.logissue type=error]Multiple .sln files found. Please specify."
-              $solutionFiles | ForEach-Object { Write-Host "Found: $($_.FullName)" }
-              exit 1
-          }
-
-          $solutionPath = $solutionFiles[0].FullName
-          Write-Host "Using solution: $solutionPath"
-
-          & $msbuild $solutionPath `
-            /p:Configuration=$(buildConfiguration) `
-            /p:DeployOnBuild=true `
-            /p:PublishProfile=FolderProfile `
-            /p:PublishDir="$(sourcePath)\"
-
-          if ($LASTEXITCODE -ne 0) {
-              Write-Host "##vso[task.logissue type=error]MSBuild failed"
+          if ($solutionFiles.Count -eq 1) {
+              & $msbuild $solutionFiles[0].FullName \
+                /p:Configuration=$(buildConfiguration) \
+                /p:DeployOnBuild=true \
+                /p:PublishProfile=FolderProfile \
+                /p:PublishDir="$(sourcePath)\"
+          } else {
+              Write-Host "##vso[task.logissue type=error]Solution file issue"
               exit 1
           }
-
-          Write-Host "##[section]MSBuild completed successfully"
 
     - task: PowerShell@2
+      name: PackageBuild
       displayName: 'Package Build'
       inputs:
         targetType: 'inline'
         script: |
           $timestamp = Get-Date -Format 'yyyyMMddHHmmss'
-          New-Item -Path "$(publishPath)" -ItemType Directory -Force | Out-Null
-
-          if (-not (Get-ChildItem -Path "$(sourcePath)\*" -Recurse | Where-Object { -not $_.PSIsContainer })) {
-              Write-Host "##vso[task.logissue type=error]No files found in source path: $(sourcePath)"
-              exit 1
-          }
-
-          Write-Host "Contents of source path before packaging:"
-          Get-ChildItem -Path "$(sourcePath)\*" -Recurse | Select-Object FullName
-
           $zipPath = "$(publishPath)\$(zipBaseName)_$timestamp.zip"
           Compress-Archive -Path "$(sourcePath)\*" -DestinationPath $zipPath -Force
-
-          if (-not (Test-Path $zipPath)) {
-              Write-Host "##vso[task.logissue type=error]ZIP package creation failed at path: $zipPath"
-              exit 1
-          }
-
           Write-Host "##vso[task.setvariable variable=publishZipPath;isOutput=true]$zipPath"
-          Write-Host "##[section]Package created at $zipPath"
 
     - task: PowerShell@2
       displayName: 'Stop App Pool'
@@ -125,7 +91,7 @@ stages:
               $timestamp = Get-Date -Format 'yyyyMMddHHmmss'
               $backupPath = "$(backupRootPath)\$(appPoolName)_$timestamp.zip"
               Compress-Archive -Path "$(deployPath)\*" -DestinationPath $backupPath -Force
-              Write-Host "##[section]Backup created at $backupPath"
+              Write-Host "Backup created at $backupPath"
           }
 
     - task: PowerShell@2
@@ -133,40 +99,30 @@ stages:
       inputs:
         targetType: 'inline'
         script: |
-          if (-not (Test-Path "$(publishZipPath)")) {
-              Write-Host "##vso[task.logissue type=error]Expected package not found: $(publishZipPath)"
+          $zipPath = "$(publishZipPath)"
+          if (-not (Test-Path $zipPath)) {
+              Write-Host "##vso[task.logissue type=error]ZIP file not found: $zipPath"
               exit 1
           }
-
-          Write-Host "Deploying from package: $(publishZipPath)"
           Remove-Item -Recurse -Force "$(deployPath)\*" -ErrorAction SilentlyContinue
-          Expand-Archive -Path "$(publishZipPath)" -DestinationPath "$(deployPath)" -Force
-          Write-Host "##[section]Deployment completed"
+          Expand-Archive -Path $zipPath -DestinationPath "$(deployPath)" -Force
 
     - task: PowerShell@2
       displayName: 'Restore config files from backup'
       inputs:
         targetType: 'inline'
         script: |
-          $latestBackup = Get-ChildItem "$(backupRootPath)" -Filter '*.zip' | Sort-Object CreationTime -Descending | Select-Object -First 1
+          $latestBackup = Get-ChildItem "$(backupRootPath)" -Filter '*.zip' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if ($latestBackup) {
-              $tempExtractPath = "$(sourcePath)\_config_restore"
-              New-Item -ItemType Directory -Path $tempExtractPath -Force | Out-Null
-              Expand-Archive -Path $latestBackup.FullName -DestinationPath $tempExtractPath -Force
-
+              $tempExtract = "$(sourcePath)\_config_restore"
+              Expand-Archive -Path $latestBackup.FullName -DestinationPath $tempExtract -Force
               foreach ($file in @("appsettings.json", "web.config")) {
-                  $src = Join-Path $tempExtractPath $file
+                  $src = Join-Path $tempExtract $file
                   if (Test-Path $src) {
                       Copy-Item $src -Destination "$(deployPath)" -Force
-                      Write-Host "##[section]Restored $file from backup"
-                  } else {
-                      Write-Host "##vso[task.logissue type=warning]$file not found in backup, skipped"
                   }
               }
-
-              Remove-Item -Recurse -Force $tempExtractPath
-          } else {
-              Write-Host "##vso[task.logissue type=warning]No backup found to restore config files"
+              Remove-Item -Recurse -Force $tempExtract
           }
 
     - task: PowerShell@2
@@ -176,16 +132,14 @@ stages:
         script: |
           & "C:\Windows\System32\inetsrv\appcmd" start apppool "/apppool.name:$(appPoolName)"
           Start-Sleep -Seconds 10
-          $status = (Get-WebAppPoolState -Name "$(appPoolName)").Value
-          if ($status -ne "Started") {
+          if ((Get-WebAppPoolState -Name "$(appPoolName)").Value -ne "Started") {
               Write-Host "##vso[task.logissue type=error]App pool failed to start"
               exit 1
           }
-          Write-Host "##[section]App pool started"
 
 - stage: RollbackStage
   displayName: Rollback Deployment
-  condition: eq('${{ parameters.action }}', 'rollback')
+  condition: eq(variables['action'], 'rollback')
   jobs:
   - job: RollbackJob
     displayName: Restore Last Backup
@@ -205,15 +159,14 @@ stages:
       inputs:
         targetType: 'inline'
         script: |
-          $latestBackup = Get-ChildItem "$(backupRootPath)" -Filter '*.zip' | Sort-Object CreationTime -Descending | Select-Object -First 1
-          if (-not $latestBackup) {
-              Write-Host "##vso[task.logissue type=error]No backup found to rollback"
+          $latestBackup = Get-ChildItem "$(backupRootPath)" -Filter '*.zip' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if ($latestBackup) {
+              Remove-Item -Recurse -Force "$(deployPath)\*" -ErrorAction SilentlyContinue
+              Expand-Archive -Path $latestBackup.FullName -DestinationPath "$(deployPath)" -Force
+          } else {
+              Write-Host "##vso[task.logissue type=error]No backup found"
               exit 1
           }
-
-          Remove-Item -Recurse -Force "$(deployPath)\*" -ErrorAction SilentlyContinue
-          Expand-Archive -Path $latestBackup.FullName -DestinationPath "$(deployPath)" -Force
-          Write-Host "##[section]Rollback completed: restored $($latestBackup.FullName)"
 
     - task: PowerShell@2
       displayName: 'Start App Pool'
@@ -222,9 +175,7 @@ stages:
         script: |
           & "C:\Windows\System32\inetsrv\appcmd" start apppool "/apppool.name:$(appPoolName)"
           Start-Sleep -Seconds 10
-          $status = (Get-WebAppPoolState -Name "$(appPoolName)").Value
-          if ($status -ne "Started") {
+          if ((Get-WebAppPoolState -Name "$(appPoolName)").Value -ne "Started") {
               Write-Host "##vso[task.logissue type=error]App pool failed to start after rollback"
               exit 1
           }
-          Write-Host "##[section]App pool started after rollback"
